@@ -1,0 +1,33 @@
+# 构建产物
+build/
+bin/
+output/
+*.o
+*.so
+*.a
+
+# 临时文件
+*.log
+*.rdb
+dump.rdb
+nohup.out
+
+# IDE 配置
+.vscode/
+.idea/
+
+# 测试输出
+quick_test_fastcdc/
+experiments/out/
+
+# 其他不需要的目录
+buildkit/
+containerd/
+var/
+overlaybd-image-repo/
+experiments/
+DADI_OverlayBD_demo\ copy/
+
+# 保留这些脚本但排除某些临时文件
+*.sh~
+*.md~

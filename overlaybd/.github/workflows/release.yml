@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: "Build Release"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        images: [ubuntu_18.04, ubuntu_20.04, ubuntu_22.04, ubuntu_24.04, centos_7, centos_8, mcr.microsoft.com/cbl-mariner/base/core_2.0, mcr.microsoft.com/azurelinux/base/core_3.0]
+        platforms: [linux/amd64, linux/arm64]
+        exclude:
+          - images: centos_7
+            platforms: linux/arm64
+    steps:
+    - name: Set Release Version
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      shell: bash
+      run: |
+        releasever=${{ github.ref }}
+        releasever="${releasever#refs/tags/}"
+        echo "RELEASE_VERSION=${releasever}" >> $GITHUB_ENV
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        submodules: true
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Setup buildx instance
+      uses: docker/setup-buildx-action@v3
+    - name: Build
+      shell: bash
+      run: |
+        RELEASE_VERSION=${{ env.RELEASE_VERSION }}
+        if [[ -z ${RELEASE_VERSION} ]]; then
+          git fetch --tags
+          RELEASE_VERSION=$(git tag --sort=v:refname -l v* | tail -1) # v1.1.3
+          version="${RELEASE_VERSION#v}"
+
+          IFS='.' read -ra version_parts <<< "$version"
+
+          major_version=${version_parts[0]}
+          minor_version=${version_parts[1]}
+          patch_version=${version_parts[2]}
+
+          patch_version=$((patch_version + 1))
+
+          new_version="$major_version.$minor_version.$patch_version"
+          RELEASE_VERSION="${new_version}rc" #1.1.4rc
+        fi
+        RELEASE_VERSION=${RELEASE_VERSION#v}
+        COMMIT_ID="${RELEASE_VERSION}-$(git rev-parse --short HEAD)"
+        RELEASE_NO="$(date +%Y%m%d).$(git rev-parse --short HEAD)"
+
+        echo "RELEASE_VERSION=${RELEASE_VERSION} RELEASE_NO=${RELEASE_NO}"
+
+        # parse BUILD_IMAGE and OS from IMAGE
+        BUILD_IMAGE=${IMAGE/_/:}
+        OS=${BUILD_IMAGE}
+        if [[ "${BUILD_IMAGE}" =~ "mcr.microsoft.com/cbl-mariner/base/core:" ]]; then
+          OS="mariner:${BUILD_IMAGE#mcr.microsoft.com/cbl-mariner/base/core:}"
+        elif [[ "${BUILD_IMAGE}" =~ "mcr.microsoft.com/azurelinux/base/core:" ]]; then
+          OS="azurelinux:${BUILD_IMAGE#mcr.microsoft.com/azurelinux/base/core:}"
+        fi
+        echo "BUILD_IMAGE=${BUILD_IMAGE}"
+        echo "OS=${OS}"
+
+
+        docker buildx build --build-arg COMMIT_ID=${COMMIT_ID} --build-arg BUILD_IMAGE=${BUILD_IMAGE} --build-arg OS=${OS} --build-arg RELEASE_VERSION=${RELEASE_VERSION} --build-arg RELEASE_NO=${RELEASE_NO} -f .github/workflows/release/Dockerfile --platform=${{ matrix.platforms }} -o releases/ .
+
+        # remove unused package
+        if [[ "${OS}" =~ "ubuntu" ]]; then
+          rm -f releases/overlaybd-*.rpm
+        elif [[ "${OS}" =~ "centos" ]]; then
+          rm -f releases/overlaybd-*.deb
+        elif [[ "${OS}" =~ "mariner" ]]; then
+          rm -f releases/overlaybd-*.deb
+        elif [[ "${OS}" =~ "azurelinux" ]]; then
+          rm -f releases/overlaybd-*.deb
+        fi
+        ls -l releases/
+      env:
+        IMAGE: ${{ matrix.images }}
+    - id: upload_name
+      name: Upload name
+      run: |
+        image=${{ matrix.images }}
+        platform=${{ matrix.platforms }}
+        name="releases-${image//\//_}-${platform/\//_}"
+        echo "name=${name}" >> "$GITHUB_OUTPUT"
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.upload_name.outputs.name }}
+        path: releases/overlaybd-*.*
+
+  dev-release:
+    name: "Development Release"
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download builds and release notes
+        uses: actions/download-artifact@v4
+      - name: Display downloaded files
+        shell: bash
+        run: ls -l releases*/
+      - name: Create Release
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "latest"
+          prerelease: true
+          title: "Development Build"
+          files: |
+            releases*/overlaybd-*.*
+
+  release:
+    name: "Tagged Release"
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download builds and release notes
+        uses: actions/download-artifact@v4
+      - name: Display downloaded files
+        shell: bash
+        run: ls -l releases*/
+      - name: Create Release
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: false
+          files: |
+            releases*/overlaybd-*.*

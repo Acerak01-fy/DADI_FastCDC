@@ -1,0 +1,100 @@
+name: CI | Userspace Convertor
+on:
+  workflow_call:
+    inputs:
+      commit-hash:
+        required: true
+        type: string
+      image-tag:
+        required: true
+        type: string
+      github-repository:
+        required: true
+        type: string
+
+jobs:
+  run-ci-userspace-convertor:
+    name: Run CI | Userspace Convertor
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    container:
+      image: ghcr.io/${{ inputs.github-repository }}/overlaybd-ci-images:${{ inputs.image-tag }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /dev:/dev
+        - /lib/modules:/lib/modules
+        - /sys/kernel/config:/sys/kernel/config
+        - /mnt:/var/lib/containerd
+      options: --privileged
+      env:
+        DOCKER_HOST: "unix:///app/dockerd/docker.sock"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit-hash }}
+          fetch-depth: 0
+
+      - name: Start OverlayBD
+        working-directory: /app
+        shell: bash
+        run: |
+          bash start_services.sh
+          sleep 5s
+
+      - name: Prepare Local Registry
+        working-directory: ci/scripts
+        shell: bash
+        run: |
+          bash new_registry.sh
+          bash prepare_image.sh registry.hub.docker.com/overlaybd/centos:centos7.9.2009                                                                   localhost:5000/centos:centos7.9.2009 && \
+          bash prepare_image.sh registry.hub.docker.com/overlaybd/ubuntu:22.04                                                                            localhost:5000/ubuntu:22.04 && \
+          bash prepare_image.sh registry.hub.docker.com/overlaybd/redis:7.2.3                                                                             localhost:5000/redis:7.2.3 && \
+          bash prepare_image.sh registry.hub.docker.com/overlaybd/redis@sha256:309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc           localhost:5000/redis@sha256:309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc && \
+          bash prepare_image.sh registry.hub.docker.com/overlaybd/wordpress:6.4.2                                                                         localhost:5000/wordpress:6.4.2 && \
+          bash prepare_image.sh registry.hub.docker.com/overlaybd/nginx:1.25.3                                                                            localhost:5000/nginx:1.25.3
+
+      - name: CI - uconv reproduce
+        working-directory: ci/uconv_reproduce
+        shell: bash
+        run: |
+          bash ci-uconv-reproduce.sh
+
+      - name: CI - uconv E2E
+        working-directory: ci/scripts
+        shell: bash
+        run: |
+          /opt/overlaybd/snapshotter/convertor -r localhost:5000/redis -i 7.2.3 --overlaybd 7.2.3_overlaybd --turboOCI 7.2.3_turbo
+          bash run_container.sh localhost:5000/redis:7.2.3_overlaybd
+          bash run_container.sh localhost:5000/redis:7.2.3_turbo
+          /opt/overlaybd/snapshotter/convertor -r localhost:5000/redis -i 7.2.3 --overlaybd 7.2.3_overlaybd_256 --turboOCI 7.2.3_turbo_256 --vsize 256
+          bash run_container.sh localhost:5000/redis:7.2.3_overlaybd_256
+          bash run_container.sh localhost:5000/redis:7.2.3_turbo_256
+
+      - name: CI - uconv E2E with digest input
+        working-directory: ci/scripts
+        shell: bash
+        run: |
+          /opt/overlaybd/snapshotter/convertor -r localhost:5000/redis -g sha256:309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc --overlaybd 309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc_overlaybd --turboOCI 309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc_turbo
+          bash run_container.sh localhost:5000/redis:309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc_overlaybd
+          bash run_container.sh localhost:5000/redis:309f99718ff2424f4ae5ebf0e46f7f0ce03058bf47d9061d1d66e4af53b70ffc_turbo
+
+      - name: install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.0'
+
+      - name: set env
+        shell: bash
+        run: |
+          echo "GOPATH=${{ github.workspace }}" >> $GITHUB_ENV
+          echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+
+      - name: CI - E2E Go Test
+        working-directory: ci/e2e
+        shell: bash
+        run: |
+          go test -v ./...
